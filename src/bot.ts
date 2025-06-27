@@ -58,9 +58,8 @@ async function setCartKeyboard(ctx: any, user_id: string, notify: boolean = fals
 bot.action(/cat_(.+)/, async ctx => {
   const user_id = ctx.from.id;
   const cat = ctx.match[1] as 'merch' | 'plush';
-  const size = cat === 'merch' ? 'M' : 'P';
 
-  const { data: products } = await supabase.from('products').select('*').eq('size', size);
+  const { data: products } = await supabase.from('products').select('*');
   if (!products || products.length === 0) return ctx.reply('Нет товаров');
 
   const sess: Session = { category: cat, index: 0, products };
@@ -95,6 +94,13 @@ function getProductKeyboard(productId: number, index: number, total: number, isI
 // --- обновление товара в уже отправленном сообщении ---
 async function updateProductView(ctx: Context, sess: Session, forceInCart?: boolean) {
   const product = sess.products[sess.index];
+  if (!product) {
+    await ctx.reply('Набор товаров изменился, выберите еще раз:', Markup.inlineKeyboard([
+      [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
+    ]));
+
+    return;
+  }
   const caption = `${product.name} | ${product.size}\nЦена: ${product.price}₽\nОсталось: ${product.remains}`;
   if (!sess.message_id) return;
 
