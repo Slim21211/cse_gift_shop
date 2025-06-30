@@ -14,12 +14,15 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.50.2",
     "@vercel/node": "^5.1.16",
+    "axios": "^1.10.0",
     "dotenv": "^16.5.0",
     "telegraf": "^4.16.3",
-    "tg_bot_boil": "file:"
+    "tg_bot_boil": "file:",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
+    "@types/xml2js": "^0.4.14",
     "nodemon": "^3.1.10",
     "supabase": "^2.26.9",
     "ts-node": "^10.9.2",
