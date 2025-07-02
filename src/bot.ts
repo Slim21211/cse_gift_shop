@@ -4,6 +4,8 @@ import supabase from './lib/supabase';
 import { Database } from './types/database';
 import axios from 'axios';
 import * as xml2js from 'xml2js';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -29,6 +31,47 @@ interface Session {
 const sessions = new Map<number, Session>();
 let usersCache: any[] = [];
 let tokenInfo: { access_token: string; expires_at: number } | null = null;
+
+const AUTH_FILE = path.resolve(__dirname, 'auth_store.json');
+let authStore: Record<string, number> = {};
+if (existsSync(AUTH_FILE)) {
+  authStore = JSON.parse(readFileSync(AUTH_FILE, 'utf-8'));
+}
+
+function saveAuthStore() {
+  writeFileSync(AUTH_FILE, JSON.stringify(authStore));
+}
+
+function isAuthorized(user_id: number): boolean {
+  const expiresAt = authStore[user_id];
+  return typeof expiresAt === 'number' && Date.now() < expiresAt;
+}
+
+function setAuthorized(user_id: number): void {
+  const month = 1000 * 60 * 60 * 24 * 30;
+  authStore[user_id] = Date.now() + month;
+  saveAuthStore();
+}
+
+async function checkAuthorize(ctx: Context): Promise<boolean> {
+  if (!ctx.from) {
+    return false;
+  }
+
+  const user_id = ctx.from.id;
+  if (!isAuthorized(user_id)) {
+    await fetchUsers();
+    sessions.set(user_id, { index: 0, products: [], stage: undefined });
+    await ctx.reply(
+      'Вы не авторизованы. Пожалуйста, авторизуйтесь:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🔐 Авторизоваться', 'start_auth')]
+      ])
+    );
+    return false;
+  }
+  return true;
+}
 
 // === Получение access token ===
 async function getAccessToken(): Promise<string> {
@@ -115,7 +158,7 @@ bot.start(async ctx => {
 
 // === Начало авторизации ===
 bot.action('start_auth', async ctx => {
-  const sess = sessions.get(ctx.from.id);
+  const sess = sessions.get(ctx.from.id);  
   if (!sess) return;
   sess.stage = 'awaiting_email';
   await ctx.reply('Введите ваш email для авторизации:');
@@ -164,11 +207,22 @@ bot.on('text', async ctx => {
       sess.stage = 'awaiting_email';
     }
 
+    setAuthorized(ctx.from.id);
+
     return;
   }
 
   // === Обработка нажатия на кнопку "🛒 Корзина" ===
   if (/^🛒 Корзина/.test(text)) {
+   const sess = sessions.get(user_id);
+    if (sess && sess.message_id) {
+      try {
+        await ctx.deleteMessage(sess.message_id);
+      } catch (e) {
+        console.warn('Не удалось удалить сообщение:', e);
+      }
+    }
+
     const { data } = await supabase
       .from('cart_items')
       .select('quantity, products(name)')
@@ -215,6 +269,9 @@ async function setCartKeyboard(ctx: any, user_id: string, notify: boolean = fals
 
 // --- выбор категории ---
 bot.action(/cat_(.+)/, async ctx => {
+  await ctx.deleteMessage();
+  if (!(await checkAuthorize(ctx))) return;
+
   const user_id = ctx.from.id;
   const cat = ctx.match[1] as 'merch' | 'plush';
 
@@ -300,6 +357,7 @@ bot.action(/prev|next|back/, async ctx => {
   if (ctx.match[0] === 'next') sess.index = Math.min(sess.products.length - 1, sess.index + 1);
   if (ctx.match[0] === 'back') {
     sess.message_id = undefined;
+    await ctx.deleteMessage();
     return ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
     ]));
