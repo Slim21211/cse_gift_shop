@@ -17,6 +17,7 @@ if (!token) throw new Error('BOT_TOKEN не найден');
 export const bot = new Telegraf(token);
 
 type Product = Database['public']['Tables']['products']['Row'];
+
 interface Session {
   stage?: 'awaiting_email';
   category?: 'merch' | 'plush';
@@ -25,10 +26,12 @@ interface Session {
   message_id?: number;
   email?: string;
   userId?: string;
-  points?: number;
+  firstName?: string;
+  lastName?: string;
 }
 
 const sessions = new Map<number, Session>();
+
 let usersCache: any[] = [];
 let tokenInfo: { access_token: string; expires_at: number } | null = null;
 
@@ -60,7 +63,7 @@ async function checkAuthorize(ctx: Context): Promise<boolean> {
 
   const user_id = ctx.from.id;
   if (!isAuthorized(user_id)) {
-    await fetchUsers();
+    await fetchUsers();    
     sessions.set(user_id, { index: 0, products: [], stage: undefined });
     await ctx.reply(
       'Вы не авторизованы. Пожалуйста, авторизуйтесь:',
@@ -142,8 +145,8 @@ async function withdrawUserPoints(userId: string, amount: number, reason: string
 
 // === /start ===
 bot.start(async ctx => {
-  const user_id = ctx.from.id;
-  sessions.set(user_id, { index: 0, products: [], stage: undefined });
+  const user_id = ctx.from.id;  
+    sessions.set(user_id, { index: 0, products: [], stage: undefined });
 
   await fetchUsers();
 
@@ -162,6 +165,23 @@ bot.action('start_auth', async ctx => {
   if (!sess) return;
   sess.stage = 'awaiting_email';
   await ctx.reply('Введите ваш email для авторизации:');
+});
+
+bot.command('account', async ctx => {
+  const sess = sessions.get(ctx.from.id);
+  if (!sess || !sess.userId) {
+    return ctx.reply('Вы не авторизованы. Введите /start для начала.');
+  }
+
+  const points = await fetchUserPoints(sess.userId);
+  const lines = [
+    `👤 ${sess.firstName ?? ''} ${sess.lastName ?? ''}`,
+    `📧 Email: ${sess.email ?? 'неизвестен'}`,
+    `🆔 ID iSpring: ${sess.userId}`,
+    `💰 Баллы: ${points ?? 'не удалось получить'}`
+  ];
+
+  ctx.reply(lines.join('\n'));
 });
 
 // === Получение email пользователя ===
@@ -190,12 +210,12 @@ bot.on('text', async ctx => {
       const lastName = Array.isArray(fields) ? fields.find(f => f.name === 'LAST_NAME')?.value : '';
       const userId = matchedUser.userId;
 
+      sess.email = email;
       sess.userId = userId;
+      sess.firstName = firstName;
+      sess.lastName = lastName;
 
-      const points = await fetchUserPoints(userId);
-      if (points !== null) {
-        sess.points = points;
-      }
+      const points = await fetchUserPoints(userId);      
 
       await ctx.reply(`Добро пожаловать, ${firstName} ${lastName}`.trim());
       await ctx.reply(`У вас ${points ?? 0} баллов. Вы можете потратить их на покупки.`);
@@ -281,7 +301,7 @@ bot.action(/cat_(.+)/, async ctx => {
   const sess = sessions.get(user_id) ?? { index: 0, products: [] };
   sess.category = cat;
   sess.index = 0;
-  sess.products = products;
+  sess.products = products;  
 
   sessions.set(user_id, sess); // <--- не удаляй старые поля!
 
@@ -419,7 +439,7 @@ bot.action('order', async ctx => {
   await ctx.answerCbQuery('Проверка заказа...');
 
   const user_id = String(ctx.from.id);
-  const sess = sessions.get(ctx.from.id);
+  const sess = sessions.get(ctx.from.id);  
 
   if (!sess?.userId) {
     return ctx.reply('Не удалось определить вашего пользователя. Попробуйте заново авторизоваться.');
@@ -434,7 +454,7 @@ bot.action('order', async ctx => {
 
   const totalCost = data.reduce((sum, item: any) => sum + item.quantity * item.products.price, 0);
 
-  const userPoints = sess.points ?? await fetchUserPoints(sess.userId);
+  const userPoints = await fetchUserPoints(sess.userId);
 
   if (!userPoints || userPoints < totalCost) {
     return ctx.reply(`У вас недостаточно баллов для оформления заказа. Нужно ${totalCost}, у вас ${userPoints ?? 0}.`);
@@ -456,10 +476,7 @@ bot.action('order', async ctx => {
   // очистка корзины
   await supabase.from('cart_items').delete().eq('user_id', user_id);
 
-  // обновление баллов в сессии
-  sess.points = userPoints - totalCost;
-
-  await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${sess.points} баллов.`);
+  await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints} баллов.`);
   await setCartKeyboard(ctx, user_id, true);
 
   await ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
@@ -468,11 +485,20 @@ bot.action('order', async ctx => {
 });
 
 
-// === Запуск локально ===
-if (mode === 'local') {
-  bot.launch();
-  console.log('Бот запущен в режиме polling');
+// === Добавление команд в меню ===
+(async () => {
+  await bot.telegram.setMyCommands([
+    { command: 'start', description: 'Перезапустить бота' },
+    { command: 'account', description: 'Личный кабинет' }
+  ]);
 
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
-}
+// === Запуск локально ===
+  if (mode === 'local') {
+    bot.launch();
+    console.log('Бот запущен в режиме polling');
+
+    process.once('SIGINT', () => bot.stop('SIGINT'));
+    process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  }
+})();
+
