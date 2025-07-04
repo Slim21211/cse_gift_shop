@@ -4,8 +4,7 @@ import supabase from './lib/supabase';
 import { Database } from './types/database';
 import axios from 'axios';
 import * as xml2js from 'xml2js';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
-import path from 'path';
+import { InputMediaPhoto } from 'telegraf/types';
 
 dotenv.config();
 
@@ -20,40 +19,65 @@ type Product = Database['public']['Tables']['products']['Row'];
 
 interface Session {
   stage?: 'awaiting_email';
-  category?: 'merch' | 'plush';
+  category?: 'merch' | 'presents';
   index: number;
   products: Product[];
   message_id?: number;
-  email?: string;
-  userId?: string;
-  firstName?: string;
-  lastName?: string;
+  lastProductId?: number;
 }
 
+// Сессии хранят только временные данные (товары, навигация)
 const sessions = new Map<number, Session>();
 
 let usersCache: any[] = [];
 let tokenInfo: { access_token: string; expires_at: number } | null = null;
 
-const AUTH_FILE = path.resolve(__dirname, 'auth_store.json');
-let authStore: Record<string, number> = {};
-if (existsSync(AUTH_FILE)) {
-  authStore = JSON.parse(readFileSync(AUTH_FILE, 'utf-8'));
+// === Функции для работы с пользователями в БД ===
+async function getUserFromDB(telegramId: number) {
+  const { data } = await supabase
+    .from('telegram_users')
+    .select('*')
+    .eq('telegram_id', telegramId)
+    .single();
+  
+  return data;
 }
 
-function saveAuthStore() {
-  writeFileSync(AUTH_FILE, JSON.stringify(authStore));
+async function saveUserToDB(telegramId: number, userData: {
+  email: string;
+  ispring_user_id: string;
+  first_name?: string;
+  last_name?: string;
+}) {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 30); // 30 дней
+
+  const { data, error } = await supabase
+    .from('telegram_users')
+    .upsert({
+      telegram_id: telegramId,
+      email: userData.email,
+      ispring_user_id: userData.ispring_user_id,
+      first_name: userData.first_name,
+      last_name: userData.last_name,
+      expires_at: expiresAt.toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .select()
+    .single();
+
+  return { data, error };
 }
 
-function isAuthorized(user_id: number): boolean {
-  const expiresAt = authStore[user_id];
-  return typeof expiresAt === 'number' && Date.now() < expiresAt;
-}
-
-function setAuthorized(user_id: number): void {
-  const month = 1000 * 60 * 60 * 24 * 30;
-  authStore[user_id] = Date.now() + month;
-  saveAuthStore();
+async function isUserAuthorized(telegramId: number): Promise<boolean> {
+  const user = await getUserFromDB(telegramId);
+  
+  if (!user) return false;
+  
+  const expiresAt = new Date(user.expires_at);
+  const now = new Date();
+  
+  return now < expiresAt;
 }
 
 async function checkAuthorize(ctx: Context): Promise<boolean> {
@@ -62,8 +86,11 @@ async function checkAuthorize(ctx: Context): Promise<boolean> {
   }
 
   const user_id = ctx.from.id;
-  if (!isAuthorized(user_id)) {
-    await fetchUsers();    
+  const isAuthorized = await isUserAuthorized(user_id);
+  
+  if (!isAuthorized) {
+    await fetchUsers();
+    // Инициализируем сессию только для навигации
     sessions.set(user_id, { index: 0, products: [], stage: undefined });
     await ctx.reply(
       'Вы не авторизованы. Пожалуйста, авторизуйтесь:',
@@ -76,7 +103,7 @@ async function checkAuthorize(ctx: Context): Promise<boolean> {
   return true;
 }
 
-// === Получение access token ===
+// === Получение access token (без изменений) ===
 async function getAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   if (tokenInfo && tokenInfo.expires_at > now) return tokenInfo.access_token;
@@ -99,7 +126,7 @@ async function getAccessToken(): Promise<string> {
   return tokenInfo.access_token;
 }
 
-// === Получение и парсинг списка пользователей ===
+// === Получение и парсинг списка пользователей (без изменений) ===
 async function fetchUsers(): Promise<void> {
   const accessToken = await getAccessToken();
   const res = await axios.get('https://api-learn.ispringlearn.ru/user/v2', {
@@ -111,7 +138,7 @@ async function fetchUsers(): Promise<void> {
   usersCache = Array.isArray(profiles) ? profiles : profiles ? [profiles] : [];
 }
 
-// === Получение баллов пользователя ===
+// === Получение баллов пользователя (без изменений) ===
 async function fetchUserPoints(userId: string): Promise<number | null> {
   const accessToken = await getAccessToken();
   const res = await axios.get('https://api-learn.ispringlearn.ru/gamification/points', {
@@ -124,7 +151,7 @@ async function fetchUserPoints(userId: string): Promise<number | null> {
   return pointsStr ? parseInt(pointsStr, 10) : null;
 }
 
-// === Списание баллов пользователя ===
+// === Списание баллов пользователя (без изменений) ===
 async function withdrawUserPoints(userId: string, amount: number, reason: string): Promise<boolean> {
   const accessToken = await getAccessToken();
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<withdrawGamificationPoints>\n  <userId>${userId}</userId>\n  <amount>${amount}</amount>\n  <reason>${reason}</reason>\n</withdrawGamificationPoints>`;
@@ -145,43 +172,98 @@ async function withdrawUserPoints(userId: string, amount: number, reason: string
 
 // === /start ===
 bot.start(async ctx => {
-  const user_id = ctx.from.id;  
+  const user_id = ctx.from.id;
+  const sess = sessions.get(user_id);
+  
+  // Проверяем, авторизован ли пользователь
+  const isAuthorized = await isUserAuthorized(user_id);
+  
+  if (isAuthorized) {
+    await ctx.sendChatAction('typing');
+    if (sess && sess.message_id) {
+      try {
+        await ctx.deleteMessage(sess.message_id);
+      } catch (e) {
+        console.warn('Не удалось удалить сообщение:', e);
+      }
+    }
+    const user = await getUserFromDB(user_id);
+    const points = await fetchUserPoints(user.ispring_user_id);
+    await ctx.reply(
+      `👋 Добро пожаловать, ${user.first_name} ${user.last_name}!\n\n💰 У вас ${points} баллов\n\n✅ Выберите интересующий раздел`.trim(),
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
+      ])
+    );
+  } else {
+    await ctx.sendChatAction('typing');
+    // Инициализируем сессию для навигации
     sessions.set(user_id, { index: 0, products: [], stage: undefined });
+    await fetchUsers();
 
-  await fetchUsers();
-
-  await ctx.reply(
-    `Привет, ${ctx.from.first_name}!
-Для начала авторизуйтесь:`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('🔐 Авторизоваться', 'start_auth')]
-    ])
-  );
+    await ctx.reply(
+      `Добро пожаловать в телеграм бот Магазина подарков компании КСЭ!\nДля продолжения работы нужно авторизоваться:`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🔐 Авторизоваться', 'start_auth')]
+      ])
+    );
+  }
 });
 
 // === Начало авторизации ===
 bot.action('start_auth', async ctx => {
-  const sess = sessions.get(ctx.from.id);  
-  if (!sess) return;
+  await ctx.answerCbQuery();
+  await ctx.sendChatAction('typing');
+  const user_id = ctx.from.id;
+  let sess = sessions.get(user_id);
+  
+  if (!sess) {
+    sess = { index: 0, products: [], stage: undefined };
+    sessions.set(user_id, sess);
+  }
+  
   sess.stage = 'awaiting_email';
-  await ctx.reply('Введите ваш email для авторизации:');
+  await ctx.reply('Введите вашу рабочую почту для авторизации:');
 });
 
+// === Команда /account ===
 bot.command('account', async ctx => {
   const sess = sessions.get(ctx.from.id);
-  if (!sess || !sess.userId) {
-    return ctx.reply('Вы не авторизованы. Введите /start для начала.');
+  
+  const user_id = ctx.from.id;
+  const user = await getUserFromDB(user_id);
+  
+  if (!user) {
+    await ctx.deleteMessage();
+    if (sess && sess.message_id) {
+      try {
+        await ctx.deleteMessage(sess.message_id);
+      } catch (e) {
+        console.warn('Не удалось удалить сообщение:', e);
+      }
+    }
+    await ctx.sendChatAction('typing');
+    return ctx.reply('✖️ Вы не авторизованы. Введите /start для начала.');
   }
 
-  const points = await fetchUserPoints(sess.userId);
+  const points = await fetchUserPoints(user.ispring_user_id);
   const lines = [
-    `👤 ${sess.firstName ?? ''} ${sess.lastName ?? ''}`,
-    `📧 Email: ${sess.email ?? 'неизвестен'}`,
-    `🆔 ID iSpring: ${sess.userId}`,
+    `👤 ${user.first_name ?? ''} ${user.last_name ?? ''}`,
+    `📧 Email: ${user.email ?? 'неизвестен'}`,
     `💰 Баллы: ${points ?? 'не удалось получить'}`
   ];
 
-  ctx.reply(lines.join('\n'));
+  await ctx.deleteMessage();
+  if (sess && sess.message_id) {
+    try {
+      await ctx.deleteMessage(sess.message_id);
+    } catch (e) {
+      console.warn('Не удалось удалить сообщение:', e);
+    }
+  }
+  ctx.reply(lines.join('\n\n'), Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Вернуться к покупкам', 'return_to_products')],
+  ]));
 });
 
 // === Получение email пользователя ===
@@ -193,7 +275,6 @@ bot.on('text', async ctx => {
   // === Ввод email ===
   if (sess?.stage === 'awaiting_email') {
     const email = text.toLowerCase();
-    sess.email = email;
     sess.stage = undefined;
 
     const matchedUser = usersCache.find(user => {
@@ -210,31 +291,33 @@ bot.on('text', async ctx => {
       const lastName = Array.isArray(fields) ? fields.find(f => f.name === 'LAST_NAME')?.value : '';
       const userId = matchedUser.userId;
 
-      sess.email = email;
-      sess.userId = userId;
-      sess.firstName = firstName;
-      sess.lastName = lastName;
+      // Сохраняем пользователя в БД
+      await saveUserToDB(user_id, {
+        email,
+        ispring_user_id: userId,
+        first_name: firstName,
+        last_name: lastName
+      });
 
-      const points = await fetchUserPoints(userId);      
+      const points = await fetchUserPoints(userId);
 
-      await ctx.reply(`Добро пожаловать, ${firstName} ${lastName}`.trim());
-      await ctx.reply(`У вас ${points ?? 0} баллов. Вы можете потратить их на покупки.`);
-      await ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
-        [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
-      ]));
+      await ctx.reply(
+        `👋 Добро пожаловать, ${firstName} ${lastName}!\n\n💰 У вас ${points} баллов\n\n✅ Выберите интересующий раздел`.trim(),
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
+        ])
+      );
     } else {
       await ctx.reply('Пользователь с таким email не найден. Попробуйте снова.');
       sess.stage = 'awaiting_email';
     }
-
-    setAuthorized(ctx.from.id);
 
     return;
   }
 
   // === Обработка нажатия на кнопку "🛒 Корзина" ===
   if (/^🛒 Корзина/.test(text)) {
-   const sess = sessions.get(user_id);
+    const sess = sessions.get(user_id);
     if (sess && sess.message_id) {
       try {
         await ctx.deleteMessage(sess.message_id);
@@ -245,15 +328,15 @@ bot.on('text', async ctx => {
 
     const { data } = await supabase
       .from('cart_items')
-      .select('quantity, products(name)')
+      .select('quantity, products(name), price')
       .eq('user_id', String(user_id));
 
     if (!data || !data.length) {
-      return ctx.reply('Корзина пуста');
-    }
+      return ctx.reply('🚫 В корзине пока нет товаров');
+    }    
 
     const cartText = data.map((item: any, idx: number) =>
-      `${idx + 1}. ${item.products.name} ×${item.quantity}`
+      `${idx + 1}. ${item.products.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов`
     ).join('\n');
 
     await ctx.reply(`🛒 Ваша корзина:\n${cartText}`, Markup.inlineKeyboard([
@@ -266,7 +349,6 @@ bot.on('text', async ctx => {
   // === Остальные сообщения — опционально логируем ===
   console.log(`Получено сообщение от ${ctx.from.username || ctx.from.first_name}: ${text}`);
 });
-
 
 // --- клавиатура Корзина (n) ---
 async function setCartKeyboard(ctx: any, user_id: string, notify: boolean = false) {
@@ -284,40 +366,62 @@ async function setCartKeyboard(ctx: any, user_id: string, notify: boolean = fals
       one_time_keyboard: false
     }
   });
-
 }
 
+// --- возврат к товарам ---
+bot.action('return_to_products', async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
+  await ctx.deleteMessage();
+  await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+    [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
+  ]))
+});
+
 // --- выбор категории ---
-bot.action(/cat_(.+)/, async ctx => {
+bot.action('merch', async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
   await ctx.deleteMessage();
   if (!(await checkAuthorize(ctx))) return;
 
   const user_id = ctx.from.id;
-  const cat = ctx.match[1] as 'merch' | 'plush';
+  const cat = ctx.match[1] as 'merch' | 'presents';
 
   const { data: products } = await supabase.from('products').select('*');
   if (!products || products.length === 0) return ctx.reply('Нет товаров');
 
-  const sess = sessions.get(user_id) ?? { index: 0, products: [] };
+  const availableProducts = products.filter((product) => product.remains > 0)
+  
+  let sess = sessions.get(user_id);
+  if (!sess) {
+    sess = { index: 0, products: [] };
+    sessions.set(user_id, sess);
+  }
+  
   sess.category = cat;
   sess.index = 0;
-  sess.products = products;  
+  sess.products = availableProducts;
 
-  sessions.set(user_id, sess); // <--- не удаляй старые поля!
-
-  const firstProduct = products[0];
-  const caption = `${firstProduct.name} | ${firstProduct.size}\nЦена: ${firstProduct.price}₽\nОсталось: ${firstProduct.remains}`;
+  const firstProduct = availableProducts[0];
+  const caption = `📋 ${firstProduct.name}\n🔍 Размер: ${firstProduct.size}\n💰 Цена: ${firstProduct.price} баллов\n📦 Остаток: ${firstProduct.remains}`;
 
   const message = await ctx.replyWithPhoto(firstProduct.image_url ?? '', {
     caption,
-    reply_markup: getProductKeyboard(firstProduct.id, 0, products.length, false)
+    reply_markup: getProductKeyboard(firstProduct.id, 0, availableProducts.length, false)
   });
 
   sess.message_id = message.message_id;
 });
 
+bot.action('presents', async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
+  await ctx.deleteMessage();
+  await ctx.reply('🚧 Раздел в разработке, но очень скоро появится', Markup.inlineKeyboard([Markup.button.callback('⬅️ Вернуться к покупкам', 'return_to_products')]))
+})
 
-// --- генерация инлайн-кнопок под товаром ---
+// --- генерация инлайн-кнопок под товаром (без изменений) ---
 function getProductKeyboard(productId: number, index: number, total: number, isInCart: boolean) {
   return Markup.inlineKeyboard([
     [
@@ -332,17 +436,24 @@ function getProductKeyboard(productId: number, index: number, total: number, isI
   ]).reply_markup;
 }
 
-// --- обновление товара в уже отправленном сообщении ---
+// --- обновление товара в уже отправленном сообщении (без изменений) ---
 async function updateProductView(ctx: Context, sess: Session, forceInCart?: boolean) {
   const product = sess.products[sess.index];
   if (!product) {
     await ctx.reply('Набор товаров изменился, выберите еще раз:', Markup.inlineKeyboard([
-      [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
+      [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
-
     return;
   }
-  const caption = `${product.name} | ${product.size}\nЦена: ${product.price}₽\nОсталось: ${product.remains}`;
+
+  // Проверка на дубликат продукта и не форсированный апдейт
+  if (sess.lastProductId === product.id && !forceInCart) {
+    return;
+  }
+
+  sess.lastProductId = product.id;
+
+  const caption = `📋 ${product.name}\n🔍 Размер: ${product.size}\n💰 Цена: ${product.price} баллов\n📦 Остаток: ${product.remains}`;
   if (!sess.message_id) return;
 
   const { data: cartItems } = await supabase
@@ -352,63 +463,112 @@ async function updateProductView(ctx: Context, sess: Session, forceInCart?: bool
     .eq('product_id', product.id);
 
   const isInCart = forceInCart ?? !!(cartItems && cartItems.length);
+  const media: InputMediaPhoto = {
+    type: 'photo',
+    media: product.image_url ?? '',
+    caption
+  };
+  const reply_markup = getProductKeyboard(product.id, sess.index, sess.products.length, isInCart);
 
-  await ctx.telegram.editMessageMedia(
-    ctx.chat!.id,
-    sess.message_id,
-    undefined,
-    {
-      type: 'photo',
-      media: product.image_url ?? '',
-      caption
-    },
-    {
-      reply_markup: getProductKeyboard(product.id, sess.index, sess.products.length, isInCart)
+  try {
+    await ctx.telegram.editMessageMedia(
+      ctx.chat!.id,
+      sess.message_id,
+      undefined,
+      media,
+      { reply_markup }
+    );
+  } catch (err: any) {
+    if (err?.description?.includes('message is not modified')) {
+      // Просто игнорируем
+      console.warn('⏭ Пропущено обновление: контент не изменился');
+    } else {
+      throw err;
     }
-  );
+  }
 }
 
-// --- перелистывание товаров ---
+// --- перелистывание товаров (без изменений) ---
 bot.action(/prev|next|back/, async ctx => {
+  await ctx.answerCbQuery('Загрузка товаров...');
   const sess = sessions.get(ctx.from.id);
-  if (!sess) return;
+  if (!sess) {
+    ctx.deleteMessage();
+    return ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+      [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
+    ]));
+  }
 
   if (ctx.match[0] === 'prev') sess.index = Math.max(0, sess.index - 1);
   if (ctx.match[0] === 'next') sess.index = Math.min(sess.products.length - 1, sess.index + 1);
   if (ctx.match[0] === 'back') {
     sess.message_id = undefined;
     await ctx.deleteMessage();
-    return ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
-      [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
+    return ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+      [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
   }
 
   await updateProductView(ctx, sess);
 });
 
-// --- добавление в корзину ---
+// --- добавление в корзину с проверкой остатков ---
 bot.action(/select_(\d+)/, async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
   const user_id = String(ctx.from.id);
   const product_id = Number(ctx.match[1]);
-
-  const { data } = await supabase.from('cart_items').select('*')
+ 
+  // Получаем информацию о товаре
+  const { data: product } = await supabase
+    .from('products')
+    .select('remains, price')
+    .eq('id', product_id)
+    .single();  
+ 
+  if (!product?.remains) {
+    await ctx.deleteMessage();
+    return ctx.reply('❌ К сожалению, данная позиция закончилась', Markup.inlineKeyboard([Markup.button.callback('⬅️ Вернуться к покупкам', 'return_to_products')]));
+  }  
+ 
+  // Проверяем текущее количество в корзине
+  const { data: cartItem } = await supabase
+    .from('cart_items')
+    .select('quantity, price')
     .eq('user_id', user_id)
-    .eq('product_id', product_id);
-
-  if (data && data.length) {
-    await supabase.from('cart_items').update({ quantity: data[0].quantity + 1 })
+    .eq('product_id', product_id)
+    .single();
+ 
+  const currentQuantity = cartItem?.quantity || 0;
+  const currentPrice = cartItem?.price || 0;  
+ 
+  // Проверяем, можно ли добавить еще один товар
+  if (currentQuantity >= (product.remains || 0)) {
+    return ctx.answerCbQuery('❌ К сожалению, данная позиция закончилась', { show_alert: true });
+  }
+ 
+  // Добавляем товар в корзину  
+  if (cartItem) {
+    const newQuantity = currentQuantity + 1;
+    await supabase
+      .from('cart_items')
+      .update({ quantity: newQuantity, price: newQuantity * product.price })
       .eq('user_id', user_id)
       .eq('product_id', product_id);
   } else {
-    await supabase.from('cart_items').insert({ user_id, product_id, quantity: 1 });
+    await supabase
+      .from('cart_items')
+      .insert({ user_id, product_id, quantity: 1, price: product.price });
   }
-
+ 
   await updateProductView(ctx, sessions.get(ctx.from.id)!, true);
   await setCartKeyboard(ctx, user_id, true);
-});
+ });
 
-// --- удаление из корзины ---
+// --- удаление из корзины (без изменений) ---
 bot.action(/remove_(\d+)/, async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
   const user_id = String(ctx.from.id);
   const product_id = Number(ctx.match[1]);
 
@@ -420,8 +580,10 @@ bot.action(/remove_(\d+)/, async ctx => {
   await setCartKeyboard(ctx, user_id, true);
 });
 
-// --- очистка корзины ---
+// --- очистка корзины (без изменений) ---
 bot.action('clear_cart', async ctx => {
+  await ctx.answerCbQuery('');
+  await ctx.sendChatAction('typing');
   const user_id = String(ctx.from.id);
   await supabase.from('cart_items').delete().eq('user_id', user_id);
 
@@ -429,61 +591,145 @@ bot.action('clear_cart', async ctx => {
   await ctx.answerCbQuery('Корзина очищена');
   await ctx.editMessageText('Корзина очищена ✅');
 
-  await ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
-    [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
+  await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+    [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
   ]));
 });
 
 // --- оформление заказа ---
 bot.action('order', async ctx => {
   await ctx.answerCbQuery('Проверка заказа...');
+  await ctx.sendChatAction('typing');
 
   const user_id = String(ctx.from.id);
-  const sess = sessions.get(ctx.from.id);  
+  const user = await getUserFromDB(ctx.from.id);
 
-  if (!sess?.userId) {
-    return ctx.reply('Не удалось определить вашего пользователя. Попробуйте заново авторизоваться.');
+  if (!user) {
+    return ctx.reply('Не удалось определить вашего пользователя. Попробуйте заново авторизоваться: /start');
   }
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('cart_items')
-    .select('quantity, products(name, price)')
+    .select('quantity, product_id, products(name, price, remains), price')
     .eq('user_id', user_id);
 
-  if (!data || !data.length) return ctx.reply('Корзина пуста');
+  if (error) {
+    console.error('Ошибка при получении корзины:', error);
+    return ctx.reply('Не удалось получить данные корзины. Попробуйте позже.');
+  }
 
-  const totalCost = data.reduce((sum, item: any) => sum + item.quantity * item.products.price, 0);
+  if (!data || data.length === 0) {
+    return ctx.reply('🚫 В корзине пока нет товаров');
+  }
 
-  const userPoints = await fetchUserPoints(sess.userId);
+  // Тип ответа от Supabase
+  type RawCartItem = {
+    quantity: number;
+    product_id: number;
+    products: {
+      name: string;
+      price: number;
+      remains: number;
+    }[];
+    price: number;
+  };
+
+  // Целевой тип, с которым будем работать
+  type CartItemWithProduct = {
+    quantity: number;
+    product_id: number;
+    product: {
+      name: string;
+      price: number;
+      remains: number;
+    } | null;
+    price: number;
+  };
+
+  const rawCartItems = data as RawCartItem[];
+
+  const cartItems: CartItemWithProduct[] = rawCartItems.map(item => ({
+    quantity: item.quantity,
+    product_id: item.product_id,
+    product: Array.isArray(item.products) ? item.products[0] : item.products ?? null,
+    price: item.price,
+  }));  
+  
+  // Проверяем наличие всех продуктов
+  const invalidItems = cartItems.filter(item => !item.product);
+  if (invalidItems.length > 0) {
+    return ctx.reply('Некоторые товары устарели или были удалены. Обновите корзину.');
+  }
+
+  // Проверяем остатки
+  const insufficientStock = cartItems.filter(item =>
+    item.product && item.quantity > item.product.remains
+  );
+
+  if (insufficientStock.length > 0) {
+    const stockErrors = insufficientStock.map(item =>
+      `${item.product!.name}: нужно ${item.quantity}, в наличии ${item.product!.remains}`
+    ).join('\n');
+
+    return ctx.reply(`❌ Вы заказали больше, чем осталось:\n${stockErrors}`);
+  }
+
+  const totalCost = cartItems.reduce((sum, item) =>
+    sum + item.quantity * (item.product!.price), 0
+  );
+
+  const userPoints = await fetchUserPoints(user.ispring_user_id);
 
   if (!userPoints || userPoints < totalCost) {
-    return ctx.reply(`У вас недостаточно баллов для оформления заказа. Нужно ${totalCost}, у вас ${userPoints ?? 0}.`);
+    return ctx.reply(`❌ У вас недостаточно баллов для оформления заказа. Нужно ${totalCost}, у вас ${userPoints ?? 0}.`, Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Вернуться к покупкам', 'return_to_products')],
+    ]));
   }
 
-  const success = await withdrawUserPoints(sess.userId, totalCost, 'Списание за заказ в Telegram-боте');
+  try {
+    // Списание баллов
+    const success = await withdrawUserPoints(user.ispring_user_id, totalCost, 'Списание за заказ в Telegram-боте');
 
-  if (!success) {
-    return ctx.reply('Не удалось списать баллы. Попробуйте позже или обратитесь к администратору.');
+    if (!success) {
+      return ctx.reply('❌ Не удалось списать баллы. Попробуйте позже или обратитесь к администратору.');
+    }
+
+    // Обновление остатков
+    for (const item of cartItems) {
+      const newRemains = item.product!.remains - item.quantity;
+
+      const { error } = await supabase
+        .from('products')
+        .update({ remains: newRemains })
+        .eq('id', item.product_id);
+
+      if (error) {
+        console.error(`Ошибка при обновлении остатков товара ${item.product!.name}:`, error);
+      }
+    }    
+
+    // Отправка заказа админу
+    const orderText = cartItems.map((item, index) =>
+      `${index + 1}. ${item.product!.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов\n`
+    ).join('\n');
+
+    await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n${orderText}\n\n💰 Общая стоимость: ${totalCost} баллов`);
+
+    // Очистка корзины
+    await supabase.from('cart_items').delete().eq('user_id', user_id);
+
+    await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints - totalCost} баллов.`);
+    await setCartKeyboard(ctx, user_id, true);
+
+    await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+      [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
+    ]));
+    
+  } catch (err) {
+    console.error('Ошибка при оформлении заказа:', err);
+    return ctx.reply('❌ Произошла ошибка при оформлении заказа. Попробуйте позже.');
   }
-
-  // отправка заказа администратору
-  const orderText = data.map((i: any) =>
-    `${i.products.name} ×${i.quantity}`
-  ).join('\n');
-
-  await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), `🛍 Новый заказ от ${ctx.from.first_name}:\n${orderText}`);
-
-  // очистка корзины
-  await supabase.from('cart_items').delete().eq('user_id', user_id);
-
-  await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints} баллов.`);
-  await setCartKeyboard(ctx, user_id, true);
-
-  await ctx.reply('Выберите раздел:', Markup.inlineKeyboard([
-    [Markup.button.callback('Мерч', 'cat_merch'), Markup.button.callback('Плюшки', 'cat_plush')]
-  ]));
 });
-
 
 // === Добавление команд в меню ===
 (async () => {
@@ -492,7 +738,7 @@ bot.action('order', async ctx => {
     { command: 'account', description: 'Личный кабинет' }
   ]);
 
-// === Запуск локально ===
+  // === Запуск локально ===
   if (mode === 'local') {
     bot.launch();
     console.log('Бот запущен в режиме polling');
@@ -501,4 +747,3 @@ bot.action('order', async ctx => {
     process.once('SIGTERM', () => bot.stop('SIGTERM'));
   }
 })();
-

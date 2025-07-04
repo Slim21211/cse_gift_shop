@@ -26,13 +26,39 @@ export interface Database {
           user_id: string;
           product_id: number;
           quantity: number;
+          price: number;
         };
         Insert: {
           user_id: string;
           product_id: number;
           quantity: number;
+          price: number;
         };
         Update: Partial<Database['public']['Tables']['cart_items']['Insert']>;
+      };
+      telegram_users: {
+        Row: {
+          id: number;
+          telegram_id: number;
+          email: string;
+          ispring_user_id: string;
+          first_name: string | null;
+          last_name: string | null;
+          expires_at: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          telegram_id: number;
+          email: string;
+          ispring_user_id: string;
+          first_name?: string | null;
+          last_name?: string | null;
+          expires_at: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['telegram_users']['Insert']>;
       };
     };
   };
