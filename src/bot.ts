@@ -5,6 +5,7 @@ import { Database } from './types/database';
 import axios from 'axios';
 import * as xml2js from 'xml2js';
 import { InputMediaPhoto } from 'telegraf/types';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -50,7 +51,7 @@ async function saveUserToDB(telegramId: number, userData: {
   last_name?: string;
 }) {
   const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 30); // 30 дней
+  expiresAt.setDate(expiresAt.getDate() + 1); // 30 дней
 
   const { data, error } = await supabase
     .from('telegram_users')
@@ -135,7 +136,7 @@ async function fetchUsers(): Promise<void> {
 
   const parsed = await xml2js.parseStringPromise(res.data, { explicitArray: false });
   const profiles = parsed.response?.userProfileV2;
-  usersCache = Array.isArray(profiles) ? profiles : profiles ? [profiles] : [];
+  usersCache = Array.isArray(profiles) ? profiles : profiles ? [profiles] : [];  
 }
 
 // === Получение баллов пользователя (без изменений) ===
@@ -170,6 +171,25 @@ async function withdrawUserPoints(userId: string, amount: number, reason: string
   }
 }
 
+const transporter = nodemailer.createTransport({
+  host: 'smtp.yandex.ru',
+  port: 465, // или 587
+  secure: true, // true для 465, false для 587
+  auth: {
+    user: 'GiftsShopCSE@yandex.ru',
+    pass: process.env.MAIL_PASSWORD,
+  },
+});
+
+async function sendOrderToCRM(orderText: string) {
+  await transporter.sendMail({
+    from: '"Telegram Bot" <GiftsShopCSE@yandex.ru>',
+    to: 'Podarki@cse.ru',
+    subject: 'Новая заявка из Telegram-бота',
+    text: `${orderText}`,
+  });
+}
+
 // === /start ===
 bot.start(async ctx => {
   const user_id = ctx.from.id;
@@ -187,10 +207,10 @@ bot.start(async ctx => {
         console.warn('Не удалось удалить сообщение:', e);
       }
     }
-    const user = await getUserFromDB(user_id);
+    const user = await getUserFromDB(user_id);    
     const points = await fetchUserPoints(user.ispring_user_id);
     await ctx.reply(
-      `👋 Добро пожаловать, ${user.first_name} ${user.last_name}!\n\n💰 У вас ${points} баллов\n\n✅ Выберите интересующий раздел`.trim(),
+      `👋 Добро пожаловать, ${user.first_name} ${user.last_name}!\n\n💰 У вас ${points} баллов\n\n📁 Выберите интересующий раздел`.trim(),
       Markup.inlineKeyboard([
         [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
       ])
@@ -199,7 +219,7 @@ bot.start(async ctx => {
     await ctx.sendChatAction('typing');
     // Инициализируем сессию для навигации
     sessions.set(user_id, { index: 0, products: [], stage: undefined });
-    await fetchUsers();
+    await fetchUsers();    
 
     await ctx.reply(
       `Добро пожаловать в телеграм бот Магазина подарков компании КСЭ!\nДля продолжения работы нужно авторизоваться:`,
@@ -302,7 +322,7 @@ bot.on('text', async ctx => {
       const points = await fetchUserPoints(userId);
 
       await ctx.reply(
-        `👋 Добро пожаловать, ${firstName} ${lastName}!\n\n💰 У вас ${points} баллов\n\n✅ Выберите интересующий раздел`.trim(),
+        `👋 Добро пожаловать, ${firstName} ${lastName}!\n\n💰 У вас ${points} баллов\n\n📁 Выберите интересующий раздел`.trim(),
         Markup.inlineKeyboard([
           [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
         ])
@@ -373,7 +393,7 @@ bot.action('return_to_products', async ctx => {
   await ctx.answerCbQuery('');
   await ctx.sendChatAction('typing');
   await ctx.deleteMessage();
-  await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+  await ctx.reply('📁 Выберите интересующий раздел', Markup.inlineKeyboard([
     [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
   ]))
 });
@@ -440,7 +460,7 @@ function getProductKeyboard(productId: number, index: number, total: number, isI
 async function updateProductView(ctx: Context, sess: Session, forceInCart?: boolean) {
   const product = sess.products[sess.index];
   if (!product) {
-    await ctx.reply('Набор товаров изменился, выберите еще раз:', Markup.inlineKeyboard([
+    await ctx.reply('📁 Набор товаров изменился, выберите еще раз:', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
     return;
@@ -494,7 +514,7 @@ bot.action(/prev|next|back/, async ctx => {
   const sess = sessions.get(ctx.from.id);
   if (!sess) {
     ctx.deleteMessage();
-    return ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+    return ctx.reply('📁 Выберите интересующий раздел', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
   }
@@ -504,7 +524,7 @@ bot.action(/prev|next|back/, async ctx => {
   if (ctx.match[0] === 'back') {
     sess.message_id = undefined;
     await ctx.deleteMessage();
-    return ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+    return ctx.reply('📁 Выберите интересующий раздел', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
   }
@@ -591,7 +611,7 @@ bot.action('clear_cart', async ctx => {
   await ctx.answerCbQuery('Корзина очищена');
   await ctx.editMessageText('Корзина очищена ✅');
 
-  await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+  await ctx.reply('📁 Выберите интересующий раздел', Markup.inlineKeyboard([
     [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
   ]));
 });
@@ -706,22 +726,26 @@ bot.action('order', async ctx => {
       if (error) {
         console.error(`Ошибка при обновлении остатков товара ${item.product!.name}:`, error);
       }
-    }    
+    }
 
     // Отправка заказа админу
-    const orderText = cartItems.map((item, index) =>
+    const orderContain = cartItems.map((item, index) =>
       `${index + 1}. ${item.product!.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов\n`
     ).join('\n');
 
-    await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n${orderText}\n\n💰 Общая стоимость: ${totalCost} баллов`);
+    const orderText = `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n${orderContain}\n\n💰 Общая стоимость: ${totalCost} баллов`
+
+    await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), orderText);
+
+    await sendOrderToCRM(orderText)
 
     // Очистка корзины
     await supabase.from('cart_items').delete().eq('user_id', user_id);
 
-    await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints - totalCost} баллов.`);
+    await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints - totalCost} баллов.\n\nДля подтверждения заказа Вам поступит письмо на рабочую почту.`);
     await setCartKeyboard(ctx, user_id, true);
 
-    await ctx.reply('✅ Выберите интересующий раздел', Markup.inlineKeyboard([
+    await ctx.reply('📁 Продолжите покупки, выбрав соответствующий раздел', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'presents')]
     ]));
     
