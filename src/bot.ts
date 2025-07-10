@@ -184,7 +184,7 @@ const transporter = nodemailer.createTransport({
 async function sendOrderToCRM(orderText: string) {
   await transporter.sendMail({
     from: '"Telegram Bot" <GiftsShopCSE@yandex.ru>',
-    to: 'Podarki@cse.ru',
+    to: 'giftshop@cse.ru',
     subject: 'Новая заявка из Telegram-бота',
     text: `${orderText}`,
   });
