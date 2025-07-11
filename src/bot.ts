@@ -803,50 +803,70 @@ bot.action('order', async ctx => {
   }
 
   try {
-    // Списание баллов
+    // 1. Формируем данные заказа
+    const itemsPayload = cartItems.map(item => ({
+      product_id: item.product_id,
+      name: item.product!.name,
+      quantity: item.quantity,
+      price: item.price
+    }));
+  
+    // 2. Сохраняем заказ в БД
+    const { error: insertError } = await supabase.from('orders').insert({
+      user_id: user_id,
+      user_name: `${user.first_name} ${user.last_name}`,
+      email: user.email,
+      telegram_login: ctx.from.username,
+      items: itemsPayload,
+      total_cost: totalCost
+    });
+  
+    if (insertError) {
+      console.error('Ошибка при сохранении заказа:', insertError);
+      return ctx.reply('❌ Не удалось сохранить заказ. Попробуйте позже.');
+    }
+  
+    // 3. Списываем баллы
     const success = await withdrawUserPoints(user.ispring_user_id, totalCost, 'Списание за заказ в Telegram-боте');
-
     if (!success) {
       return ctx.reply('❌ Не удалось списать баллы. Попробуйте позже или обратитесь к администратору.');
     }
-
-    // Обновление остатков
+  
+    // 4. Обновляем остатки
     for (const item of cartItems) {
       const newRemains = item.product!.remains - item.quantity;
-
-      const { error } = await supabase
+  
+      const { error: updateError } = await supabase
         .from('products')
         .update({ remains: newRemains })
         .eq('id', item.product_id);
-
-      if (error) {
-        console.error(`Ошибка при обновлении остатков товара ${item.product!.name}:`, error);
+  
+      if (updateError) {
+        console.error(`Ошибка при обновлении остатков товара ${item.product!.name}:`, updateError);
       }
     }
-
-    // Отправка заказа админу
-    const orderContain = cartItems.map((item, index) =>
-      `${index + 1}. ${item.product!.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов\n`
-    ).join('\n');
-
-    const orderText = `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n${orderContain}\n\n💰 Общая стоимость: ${totalCost} баллов`
-
+  
+    // 5. Отправляем сообщение админу
+    const orderText = `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n` +
+      itemsPayload.map((item, i) => `${i + 1}. ${item.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов\n`).join('\n') +
+      `\n\n💰 Общая стоимость: ${totalCost} баллов`;
+  
     await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), orderText);
-
-    await sendOrderToCRM(orderText)
-
-    // Очистка корзины
+    await sendOrderToCRM(orderText); // если есть такая функция
+  
+    // 6. Очищаем корзину
     await supabase.from('cart_items').delete().eq('user_id', user_id);
-
+  
+    // 7. Уведомляем пользователя
     await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints - totalCost} баллов.\n\nДля подтверждения заказа Вам поступит письмо на рабочую почту.`);
     await setCartKeyboard(ctx, user_id, true);
-
+  
     await ctx.reply('📁 Продолжите покупки, выбрав соответствующий раздел', Markup.inlineKeyboard([
       [Markup.button.callback('Мерч компании', 'merch'), Markup.button.callback('Подарки отдела', 'gifts')]
     ]));
-    
+  
   } catch (err) {
-    console.error('Ошибка при оформлении заказа:', err);
+    console.error('❌ Ошибка при оформлении заказа:', err);
     return ctx.reply('❌ Произошла ошибка при оформлении заказа. Попробуйте позже.');
   }
 });
