@@ -51,7 +51,7 @@ async function saveUserToDB(telegramId: number, userData: {
   last_name?: string;
 }) {
   const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 1); // 30 дней
+  expiresAt.setDate(expiresAt.getDate() + 1); // дни хранения авторизации
 
   const { data, error } = await supabase
     .from('telegram_users')
@@ -63,6 +63,8 @@ async function saveUserToDB(telegramId: number, userData: {
       last_name: userData.last_name,
       expires_at: expiresAt.toISOString(),
       updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'telegram_id'
     })
     .select()
     .single();
@@ -77,7 +79,7 @@ async function isUserAuthorized(telegramId: number): Promise<boolean> {
   
   const expiresAt = new Date(user.expires_at);
   const now = new Date();
-  
+    
   return now < expiresAt;
 }
 
