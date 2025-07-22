@@ -17,8 +17,10 @@
     "axios": "^1.10.0",
     "dotenv": "^16.5.0",
     "nodemailer": "^7.0.5",
+    "plural-ru": "^2.0.2",
     "telegraf": "^4.16.3",
     "tg_bot_boil": "file:",
+    "vercel": "^44.5.1",
     "xml2js": "^0.6.2"
   },
   "devDependencies": {

@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as xml2js from 'xml2js';
 import { InputMediaPhoto } from 'telegraf/types';
 import nodemailer from 'nodemailer';
+import plural from 'plural-ru';
 
 dotenv.config();
 
@@ -174,20 +175,35 @@ async function withdrawUserPoints(userId: string, amount: number, reason: string
 }
 
 const transporter = nodemailer.createTransport({
-  host: 'smtp.yandex.ru',
-  port: 465, // или 587
-  secure: true, // true для 465, false для 587
-  auth: {
-    user: 'GiftsShopCSE@yandex.ru',
-    pass: process.env.MAIL_PASSWORD,
+  host: 'smtp.cse.ru',
+  port: 587,
+  secure: false,
+  requireTLS: true,
+  connectionTimeout: 10000,
+  tls: {
+    rejectUnauthorized: false,
+    secureProtocol: 'TLSv1_2_method'
   },
-});
+  auth: {
+    user: 'giftshop@cse.ru',
+    pass: 'LUA4+mvya:',
+  }
+})
 
 async function sendOrderToCRM(orderText: string) {
+    await transporter.sendMail({
+      from: '"Telegram Bot" <giftshop@cse.ru>',
+      to: 'giftshop@cse.ru',
+      subject: 'Новая заявка из Telegram-бота',
+      text: `${orderText}`,
+    });
+}
+
+async function sendOrderToUser(orderText: string, email: string) {
   await transporter.sendMail({
-    from: '"Telegram Bot" <GiftsShopCSE@yandex.ru>',
-    to: 'giftshop@cse.ru',
-    subject: 'Новая заявка из Telegram-бота',
+    from: '"Telegram Bot" <giftshop@cse.ru>',
+    to: email,
+    subject: 'Ваша заявка из Telegram-бота',
     text: `${orderText}`,
   });
 }
@@ -846,19 +862,26 @@ bot.action('order', async ctx => {
       }
     }
   
-    // 5. Отправляем сообщение админу
+    // 5. Отправляем сообщение админу и пользователю
+    const pluralizePoints = (count: number) => plural(count, 'балл', 'балла', 'баллов');
+
     const orderText = `🛍 Новый заказ!!!\n\n👨 ${user.first_name} ${user.last_name}\n📨 ${user.email}\n🌍 @${ctx.from.username}\n\n📋 Заказ:\n` +
-      itemsPayload.map((item, i) => `${i + 1}. ${item.name} - ${item.quantity} шт.\nСтоимость: ${item.price} баллов\n`).join('\n') +
-      `\n\n💰 Общая стоимость: ${totalCost} баллов`;
+      itemsPayload.map((item, i) => `${i + 1}. ${item.name} - ${item.quantity} шт.\nСтоимость: ${item.price} ${pluralizePoints(item.price)}\n`).join('\n') +
+      `\n\n💰 Общая стоимость: ${totalCost} ${pluralizePoints(totalCost)}`;
+
+    const userText = `Вы оформили заказ в Магазине Подарков:\n\n📋 Заказ:\n` +
+      itemsPayload.map((item, i) => `${i + 1}. ${item.name} - ${item.quantity} шт.\nСтоимость: ${item.price} ${pluralizePoints(item.price)}\n`).join('\n') +
+      `\n\n💰 Общая стоимость: ${totalCost} ${pluralizePoints(totalCost)}\n\nПросьба подтвердить ответным письмом.`;
   
     await ctx.telegram.sendMessage(Number(process.env.ADMIN_ID!), orderText);
-    await sendOrderToCRM(orderText); // если есть такая функция
+    await sendOrderToCRM(orderText);
+    await sendOrderToUser(userText, user.email)
   
     // 6. Очищаем корзину
     await supabase.from('cart_items').delete().eq('user_id', user_id);
   
     // 7. Уведомляем пользователя
-    await ctx.reply(`✅ Заказ оформлен и ${totalCost} баллов списано.\nУ вас осталось ${userPoints - totalCost} баллов.\n\nДля подтверждения заказа Вам поступит письмо на рабочую почту.`);
+    await ctx.reply(`✅ Заказ оформлен и ${totalCost} ${pluralizePoints(totalCost)} списано.\nУ вас осталось ${userPoints - totalCost} ${pluralizePoints(userPoints - totalCost)}.\n\nДля подтверждения заказа Вам поступит письмо на рабочую почту.`);
     await setCartKeyboard(ctx, user_id, true);
   
     await ctx.reply('📁 Продолжите покупки, выбрав соответствующий раздел', Markup.inlineKeyboard([
