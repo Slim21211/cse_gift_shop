@@ -186,7 +186,7 @@ const transporter = nodemailer.createTransport({
   },
   auth: {
     user: 'giftshop@cse.ru',
-    pass: 'LUA4+mvya:',
+    pass: process.env.MAIL_PASSWORD,
   }
 })
 
