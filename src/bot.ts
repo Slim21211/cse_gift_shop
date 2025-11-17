@@ -243,7 +243,7 @@ function formatProductCaption(product: Product): string {
 📦 Остаток: ${product.remains}`;
 
   if (isOutOfStock) {
-    caption += '\n\n⚠️ Товар закончился';
+    caption += '\n\n⚠️ Временно недоступен';
   }
 
   return caption;
@@ -606,9 +606,12 @@ bot.action(/select_gift_(\d+)/, async (ctx) => {
     .single();
 
   if (!product?.remains) {
-    return ctx.answerCbQuery('❌ К сожалению, данный подарок закончился', {
-      show_alert: true,
-    });
+    return ctx.answerCbQuery(
+      '❌ К сожалению, данный подарок временно не доступен',
+      {
+        show_alert: true,
+      }
+    );
   }
 
   const { data: cartItem } = await supabase
@@ -621,9 +624,12 @@ bot.action(/select_gift_(\d+)/, async (ctx) => {
   const currentQuantity = cartItem?.quantity || 0;
 
   if (currentQuantity >= product.remains) {
-    return ctx.answerCbQuery('❌ К сожалению, данный подарок закончился', {
-      show_alert: true,
-    });
+    return ctx.answerCbQuery(
+      '❌ На данный момент этот подарок не доступен к заказу',
+      {
+        show_alert: true,
+      }
+    );
   }
 
   if (cartItem) {
@@ -783,9 +789,12 @@ bot.action(/prev|next|back/, async (ctx) => {
 
 // --- обработчик для кнопки "Недоступно" (новый) ---
 bot.action('out_of_stock', async (ctx) => {
-  await ctx.answerCbQuery('⚠️ К сожалению, этот товар закончился', {
-    show_alert: true,
-  });
+  await ctx.answerCbQuery(
+    '⚠️ На данный момент эта позиция не доступна к заказу',
+    {
+      show_alert: true,
+    }
+  );
 });
 
 // --- добавление в корзину с проверкой остатков ---
